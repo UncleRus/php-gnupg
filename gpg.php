@@ -13,7 +13,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
- * @version 0.0.2
+ * @version 0.0.3
  * @author Ruslan V. Uss
  *
  * homepage: https://github.com/UncleRus/php-gnupg
@@ -154,10 +154,10 @@ class GpgImportKey
 	);
 
 	static private $problemReasons = array (
-        1 => 'Invalid certificate',
-        2 => 'Issuer certificate missing',
-        3 => 'Certificate chain too long',
-        4 => 'Error storing certificate',
+		1 => 'Invalid certificate',
+		2 => 'Issuer certificate missing',
+		3 => 'Certificate chain too long',
+		4 => 'Error storing certificate',
 		5 => 'Key expired',
 		6 => 'Signature expired'
 	);
@@ -208,6 +208,8 @@ class GpgImportResult extends GpgResult
 	{
 		switch ($key)
 		{
+			case 'KEYEXPIRED':
+			case 'SIGEXPIRED':
 			case 'IMPORTED':
 				// this duplicates info we already see in import_ok & import_problem
 				break;
@@ -226,12 +228,6 @@ class GpgImportResult extends GpgResult
 				$result = GpgUtils::multiSplit ($value);
 				foreach (self::$_counts as $i => $count)
 					$this->counts [$count] = (int) $result [$i];
-				break;
-			case 'KEYEXPIRED':
-				$this->results [] = new GpgImportKey (null, 0, 5);
-				break;
-			case 'SIGEXPIRED':
-				$this->results [] = new GpgImportKey (null, 0, 6);
 				break;
 			default:
 				throw new GpgUnknownStatus ($key);
@@ -446,7 +442,7 @@ class GpgSignResult extends GpgResult
 		{
 			case 'USERID_HINT':
 			case 'NEED_PASSPHRASE':
-            case 'GOOD_PASSPHRASE':
+			case 'GOOD_PASSPHRASE':
 			case 'BEGIN_SIGNING':
 			case 'CARDCTRL':
 			case 'KEYEXPIRED':
@@ -543,10 +539,10 @@ class GpgVerifyResult extends GpgResult
 			case 'KEYEXPIRED':
 			case 'SIGEXPIRED':
 			case 'KEYREVOKED':
-	            // these are useless in verify, since they are spit out for any
-	            // pub/subkeys on the key, not just the one doing the signing.
-	            // if we want to check for signatures with expired key,
-	            // the relevant flag is EXPKEYSIG.
+				// these are useless in verify, since they are spit out for any
+				// pub/subkeys on the key, not just the one doing the signing.
+				// if we want to check for signatures with expired key,
+				// the relevant flag is EXPKEYSIG.
 				break;
 			case 'EXPSIG':
 			case 'EXPKEYSIG':
@@ -687,7 +683,7 @@ class GnuPG
 	 * Initialize a GPG process wrapper
 	 * @param string $binary Full pathname for GPG binary.
 	 * @param string $homedir Full pathname to where we can find the public and
-        	private keyrings. Default is whatever gpg defaults to.
+	 * 		private keyrings. Default is whatever gpg defaults to.
 	 */
 	public function __construct ($homedir = null, $binary = 'gpg')
 	{
@@ -788,7 +784,7 @@ class GnuPG
 	{
 		if (!is_array ($keys))
 			$keys = array ($keys);
-		$args = array_merge (($binary ? array ('--export') : array ('--armor', '--export')), $keys);
+		$args = array_merge (($binary ? array ($secret ? '--export-secret-keys' : '--export') : array ('--armor', '--export')), $keys);
 		return new GpgExportResult ($this->execute ($args));
 	}
 
