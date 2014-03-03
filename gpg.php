@@ -13,19 +13,40 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
- * @version 0.0.3
+ * @version 0.1.1
  * @author Ruslan V. Uss
  *
  * homepage: https://github.com/UncleRus/php-gnupg
  */
 
-class GpgError extends Exception {}
+class GpgError extends Exception
+{
+	public $err;
+
+	public function __construct ($message, $err)
+	{
+		parent::__construct ($message);
+		$this->err = $err;
+	}
+}
+
+class GpgGeneralError extends GpgError
+{
+	public function __construct ($err)
+	{
+		$data = array ();
+		foreach ($err as $line)
+			if (strpos ($line, 'gpg: -:') === 0)
+				$data [] = $line;
+		parent::__construct (implode ("\n", $data), $err);
+	}
+}
 
 class GpgProcError extends GpgError
 {
 	public function __construct ($binary)
 	{
-		parent::__construct ('Cannot execute GnuPG binary ('. $binary  . ')');
+		parent::__construct ('Cannot execute GnuPG binary ('. $binary  . ')', null);
 	}
 }
 
@@ -33,7 +54,7 @@ class GpgUnknownStatus extends GpgError
 {
 	public function __construct ($status)
 	{
-		parent::__construct ('Uknown GnuPG status: ' . $status);
+		parent::__construct ('Uknown GnuPG status: ' . $status, null);
 	}
 }
 
@@ -41,31 +62,70 @@ class GpgSmartcardError extends GpgError
 {
 	static private $reasons = array (
 		'Unspecified error',
-		'Canceled',
+		'Cancelled',
 		'Bad PIN'
 	);
 
-	public function __construct ($code)
+	public function __construct ($code, $err)
 	{
-		parent::__construct (isset (self::$reasons [$code]) ? self::$reasons [$code] : 'Unknown error');
+		parent::__construct (isset (self::$reasons [$code]) ? self::$reasons [$code] : 'Unknown error', $err);
 	}
 }
 
 class GpgNoDataError extends GpgError
 {
-	public function __construct ()
+	public function __construct ($err)
 	{
-		parent::__construct ('No valid data found');
+		parent::__construct ('No valid data found', $err);
+	}
+}
+
+class GpgKeyDeleteError extends GpgError
+{
+	static private $reasons = array (
+		2 => 'Must delete secret key first',
+		3 => 'Ambigious specification'
+	);
+
+	public function __construct ($code, $err)
+	{
+		parent::__construct (isset (self::$reasons [$code]) ? self::$reasons [$code] : 'Unknown error', $err);
 	}
 }
 
 class GpgPassphraseError extends GpgError {}
 
-class GpgKeyError extends GpgError {}
-
 class GpgAlgorithmError extends GpgError {}
 
-class GpgDecryptError extends GpgError {}
+class GpgKeyError extends GpgError {}
+
+class GpgDecryptionError extends GpgError {}
+
+class GpgInvalidMemberError extends GpgError
+{
+	static private $reasons = array (
+		'No specific reason given',
+		'Not found',
+		'Ambigious specification',
+		'Wrong key usage',
+		'Key revoked',
+		'Key expired',
+		'No CRL known',
+		'CRL too old',
+		'Policy mismatch',
+		'Not a secret key',
+		'Key not trusted',
+		'Missing certificate',
+		'Missing issuer certificate'
+	);
+
+	public function __construct ($err, $message, $reason = null, $who = null)
+	{
+		if (!is_null ($reason))
+			$reason = self::$reasons [$reason];
+		parent::__construct (sprintf ($message, $reason, $who), $err);
+	}
+}
 
 
 abstract class GpgUtils
@@ -93,91 +153,86 @@ abstract class GpgResult
 	 * @var string
 	 */
 	public $data;
-
+	public $status;
 	public $err;
 
-	public function __construct ($data)
+	protected $processors = array (
+		'NODATA' => '_nodata',
+		'SC_OP_FAILURE' => '_sc_op_failure',
+		'INV_SGNR' => '_inv_member',
+		'INV_RECP' => '_inv_member',
+		'NO_SGNR' => '_no_member',
+		'NO_RECP' => '_no_member',
+		'NO_SECKEY' => '_no_seckey',
+		'NO_PUBKEY' => '_no_pubkey',
+		'MISSING_PASSPHRASE' => '_missing_passphrase',
+		'BAD_PASSPHRASE' => '_bad_passphrase',
+		'DECRYPTION_FAILED' => '_decryption_failed',
+	);
+
+	public function handle ()
 	{
-		$this->data = $data ['data'];
-		$this->err = $data ['err'];
-		foreach ($data ['status'] as $row)
+		foreach ($this->status as $status => $value)
 		{
-			echo "HANDLE: " . $row [0] . ' : ' . $row [1] . "\n";
-			$this->handle ($row [0], $row [1]);
+			echo 'GpgResult::handle(): processing status ' . $status . "\n";
+			if (!isset ($this->status [$status]))
+				throw new GpgUnknownStatus ($status);
+			if ($this->status [$status])
+				call_user_method ($this->status [$status], $this, $status, $value);
 		}
 	}
 
-	abstract public function handle ($key, $value);
-}
-
-/**
- * Single GPG import result
- */
-class GpgImportKey
-{
-	/**
-	 * Imported key fingerprint
-	 * @var string
-	 */
-	public $fingerprint;
-
-	/**
-	 * True, if key has been imported
-	 * @var bool
-	 */
-	public $imported;
-
-	/**
-	 * Raw integer result
-	 * @var integer
-	 */
-	public $result;
-
-	/**
-	 * Import problem code
-	 * @var integer
-	 */
-	public $problem;
-
-	/**
-	 * Description of result
-	 * @var array of strings
-	 */
-	public $reasons = array ();
-
-	static private $okReasons = array (
-		1 => 'Entirely new key',
-		2 => 'New user IDs',
-		4 => 'New signatures',
-		8 => 'New subkeys',
-		16 => 'Contains private key'
-	);
-
-	static private $problemReasons = array (
-		1 => 'Invalid certificate',
-		2 => 'Issuer certificate missing',
-		3 => 'Certificate chain too long',
-		4 => 'Error storing certificate',
-		5 => 'Key expired',
-		6 => 'Signature expired'
-	);
-
-	public function __construct ($fingerprint, $result, $problem)
+	protected function _nodata ($code, $value)
 	{
-		$this->fingerprint = $fingerprint;
-		$this->imported = $result > 0;
-		$this->result = $result;
-		if ($this->imported)
-		{
-			foreach (self::$okReasons as $code => $text)
-				if ($result & $code)
-					$this->reasons [] = $text;
-		}
-		elseif ($fingerprint)
-			$this->reasons [] = 'Not actually changed';
-		$this->problem = $problem;
-		if ($problem)
-			$this->reasons [] = self::$problemReasons [$problem];
+		throw new GpgNoDataError ($this->err);
+	}
+
+	protected function _sc_op_failure ($code, $value)
+	{
+		throw new GpgSmartcardError ($code, $this->err);
+	}
+
+	protected function _inv_member ($code, $value)
+	{
+		list ($reason, $who) = GpgUtils::multiSplit ($value);
+		throw new GpgInvalidMemberError (
+			$this->err,
+			$code == 'INV_SGNR'
+				? 'Invalid signer: %s (%s)'
+				: 'Invalid recipient: %s (%s)',
+			$reason,
+			$who
+		);
+	}
+
+	protected function _no_member ($code, $value)
+	{
+		throw new GpgInvalidMemberError ($this->err, code == 'INV_SGNR' ? 'No signers are usable' : 'No recipients are usable');
+	}
+
+	protected function _no_seckey ($code, $value)
+	{
+		throw new GpgKeyError ('The secret key (' . $value . ') is not available', $this->err);
+	}
+
+	protected function _no_pubkey ($code, $value)
+	{
+		throw new GpgKeyError ('The public key (' . $value . ') is not available', $this->err);
+	}
+
+	protected function _missing_passphrase ($code, $value)
+	{
+		throw new GpgPassphraseError ('Missing passphrase', $this->err);
+	}
+
+	protected function _bad_passphrase ($code, $value)
+	{
+		throw new GpgPassphraseError ('Bad passphrase', $this->err);
+	}
+
+	protected function _decryption_failed ($code, $value)
+	{
+		throw new GpgDecryptionError ('The symmetric decryption failed', $this->err);
 	}
 }
 
@@ -192,6 +247,21 @@ class GpgImportResult extends GpgResult
 		'secDups', 'notImported'
 	);
 
+    static private $_ok_reasons = array (
+        1 => 'Entirely new key',
+        2 => 'New user IDs',
+        4 => 'New signatures',
+        8 => 'New subkeys',
+        16 => 'Contains private key'
+    );
+
+    static private $_problem_reasons = array (
+        1 => 'Invalid certificate',
+        2 => 'Issuer certificate missing',
+        3 => 'Certificate chain too long',
+        4 => 'Error storing certificate'
+    );
+
 	/**
 	 * Array of import results.
 	 * @var array
@@ -204,34 +274,74 @@ class GpgImportResult extends GpgResult
 	 */
 	public $counts = array ();
 
-	public function handle ($key, $value)
+	public function __construct ()
 	{
-		switch ($key)
+		$this->processors = array_merge (
+			$this->processors,
+			array (
+				'IMPORTED' => false,
+				'KEYEXPIRED' => false,
+				'SIGEXPIRED' => false,
+				'IMPORT_OK' => '_import_ok',
+				'IMPORT_PROBLEM' => '_import_problem',
+				'IMPORT_RES' => '_import_res'
+			)
+		);
+	}
+
+	private function _add_result ($fingerprint, $reason, $problem = null)
+	{
+		$reson = (int) $reason;
+		$problem = $problem ? (int) $problem : null;
+		if ($fingerprint)
 		{
-			case 'KEYEXPIRED':
-			case 'SIGEXPIRED':
-			case 'IMPORTED':
-				// this duplicates info we already see in import_ok & import_problem
-				break;
-			case 'NODATA':
-				throw new GpgNoDataError ();
-			case 'IMPORT_OK':
-				list ($reason, $fingerprint) = GpgUtils::multiSplit ($value);
-				$reason = (int) $reason;
-				$this->results [] = new GpgImportKey ($fingerprint, $reason, 0);
-				break;
-			case 'IMPORT_PROBLEM':
-				@list ($reason, $fingerprint) = GpgUtils::multiSplit ($value);
-				$this->results [] = new GpgImportKey ($fingerprint, 0, $reason);
-				break;
-			case 'IMPORT_RES':
-				$result = GpgUtils::multiSplit ($value);
-				foreach (self::$_counts as $i => $count)
-					$this->counts [$count] = (int) $result [$i];
-				break;
-			default:
-				throw new GpgUnknownStatus ($key);
+			if ($reason == 0)
+				$result_text = array ('No actually changed');
+			else
+			{
+				$result_text = array ();
+				foreach (self::$_ok_reasons as $bit => $text)
+					if ($bit & $reason)
+						$result_text [] = $text;
+			}
 		}
+		$this->results [] = array (
+			'fingerprint' => $fingerprint,
+			'imported' => $reason > 0,
+			'result' => $reason,
+			'result_text' => $result_text,
+			'problem' => $problem,
+			'problem_text' => isset (self::$_problem_reasons [$problem]) ? self::$_problem_reasons [$problem] : null
+		);
+	}
+
+	protected function _import_ok ($code, $value)
+	{
+		list ($reason, $fingerprint) = GpgUtils::multiSplit ($value);
+		$this->_add_result ($fingerprint, $reason, null);
+	}
+
+	protected function _import_problem ($code, $value)
+	{
+		$values = GpgUtils::multiSplit ($value);
+		if (count ($values) > 1)
+		{
+			$problem = $values [0];
+			$fingerprint = $values [1];
+		}
+		else
+		{
+			$problem = $values [0];
+			$fingerprint = null;
+		}
+		$this->_add_result ($fingerprint, -1, $problem);
+	}
+
+	protected function _import_res ($code, $value)
+	{
+		$result = GpgUtils::multiSplit ($value);
+		foreach (self::$_counts as $i => $count)
+			$this->counts [$count] = (int) $result [$i];
 	}
 
 	public function __get ($attr)
@@ -241,7 +351,6 @@ class GpgImportResult extends GpgResult
 		return isset ($this->counts [$attr]) ? $this->counts [$attr] : 0;
 	}
 }
-
 
 /**
  * genKey() result.
@@ -260,30 +369,26 @@ class GpgGenKeyResult extends GpgResult
 	 */
 	public $fingerprint;
 
-	public function __construct ($data)
+	public function __construct ()
 	{
-		parent::__construct ($data);
-		if (!$this->fingerprint)
-			throw new GpgError (trim ($this->err));
+		$this->processors = array_merge (
+			$this->processors,
+			array (
+				'PROGRESS' => false, 'GOOD_PASSPHRASE' => false, 'NODATA' => false,
+				'KEY_NOT_CREATED' => '_key_not_created',
+				'KEY_CREATED' => '_key_created'
+			)
+		);
 	}
 
-	public function handle ($key, $value)
+	protected function _key_not_created ($code, $value)
 	{
-		switch ($key)
-		{
-			case 'PROGRESS':
-			case 'GOOD_PASSPHRASE':
-			case 'NODATA':
-				break;
-			case 'KEY_NOT_CREATED':
-				throw new GpgError ('Key not created: ' . trim ($this->err));
-				break;
-			case 'KEY_CREATED':
-				list ($this->type, $this->fingerprint) = GpgUtils::multiSplit ($value);
-				break;
-			default:
-				throw new GpgUnknownStatus ($key);
-		}
+		throw new GpgGeneralError ($this->err);
+	}
+
+	protected function _key_created ($code, $value)
+	{
+		list ($this->type, $this->fingerprint) = array_slice (GpgUtils::multiSplit ($value), 0, 2);
 	}
 }
 
@@ -324,73 +429,69 @@ class GpgListKeysResult extends GpgResult
 				continue;
 			$this->handle ($fields [0], array_slice ($fields, 1));
 		}
-		if (!empty ($this->current))
-			$this->keys [$this->current ['fingerprint']] = $this->current;
 	}
 
-	public function handle ($key, $value)
+	public function handle ()
 	{
-		switch ($key)
+		foreach (explode ("\n", $this->data) as $line)
 		{
-			case 'pub':
-			case 'sec':
-				if (!empty ($this->current))
-					$this->keys [$this->current ['fingerprint']] = $this->current;
-				$this->current = array ();
-				foreach (self::$fields as $i => $field)
-					$this->current [$field] = isset (self::$intFields [$field]) ? (int) $value [$i] : $value [$i];
-				$this->current ['uid'] = $this->current ['uid'] != '' ? array ($this->current ['uid']) : array ();
-				$this->current ['subkeys'] = array ();
-				unset ($this->current ['dummy']);
-				break;
-			case 'uid':
-				$this->current ['uid'][] = $value [8];
-				break;
-			case 'fpr':
-				$this->current ['fingerprint'] = $value [8];
-				break;
-			case 'sub':
-				$this->current ['subkeys'][] = array ($value [3], $value [10]);
-				break;
+			$line = trim ($line);
+			if (!$line) continue;
+			$fields = explode (':', $line);
+			if (!isset (self::$keywords [$fields [0]]))
+				continue;
+			$value = array_slice ($fields, 1);
+			switch ($fields [0])
+			{
+				case 'pub':
+				case 'sec':
+					if (!empty ($this->current))
+						$this->keys [$this->current ['fingerprint']] = $this->current;
+					$this->current = array ();
+					foreach (self::$fields as $i => $field)
+						$this->current [$field] = isset (self::$intFields [$field]) ? (int) $value [$i] : $value [$i];
+					$this->current ['uid'] = $this->current ['uid'] != '' ? array ($this->current ['uid']) : array ();
+					$this->current ['subkeys'] = array ();
+					unset ($this->current ['dummy']);
+					break;
+				case 'uid':
+					$this->current ['uid'][] = $value [8];
+					break;
+				case 'fpr':
+					$this->current ['fingerprint'] = $value [8];
+					break;
+				case 'sub':
+					$this->current ['subkeys'][] = array ($value [3], $value [10]);
+					break;
+			}
 		}
+		if (!empty ($this->current))
+			$this->keys [$this->current ['fingerprint']] = $this->current;
 	}
 }
 
 
 /**
  * exportKeys() result
+ * FIXME: Убрать как лишний?
  */
-class GpgExportResult extends GpgResult
-{
-	public function __construct ($data)
-	{
-		$this->data = $data ['data'];
-		$this->err = trim ($data ['err']);
-		if ($this->err)
-			throw new GpgError ($this->err);
-	}
-
-	public function handle ($key, $value) {}
-}
+class GpgExportResult extends GpgResult {}
 
 /**
  * deleteKeys() result.
  */
 class GpgDeleteResult extends GpgResult
 {
-	private static $reasons = array (
-		2 => 'Must delete secret key first',
-		3 => 'Ambiguous specification'
-	);
-
-	public function handle ($key, $value)
+	public function __construct ()
 	{
-		if ($key == 'DELETE_PROBLEM')
-		{
-			if ($value == 1) return; // No key found
-			throw new GpgError (isset (self::$reasons [$value]) ? self::$reasons [$value] : 'Unknown error: ' . $value);
-		}
-		else throw new GpgUnknownStatus ($key);
+		$this->processors = array ('DELETE_PROBLEM' => '_delete_problem');
+	}
+
+	protected function _delete_problem ($code, $value)
+	{
+		$value = (int) $value;
+		if ($value != 1)
+			throw new GpgKeyDeleteError ($value, $this->err);
 	}
 }
 
@@ -400,6 +501,10 @@ class GpgDeleteResult extends GpgResult
  */
 class GpgSignResult extends GpgResult
 {
+	const TYPE_DETACHED = 'D';
+	const TYPE_CLEARTEXT = 'C';
+	const TYPE_STANDARD = 'S';
+
 	/**
 	 * Sign
 	 * @var string
@@ -436,43 +541,34 @@ class GpgSignResult extends GpgResult
 	 */
 	public $timestamp;
 
-	public function handle ($key, $value)
+	public $signer;
+
+	public function __construct ()
 	{
-		switch ($key)
-		{
-			case 'USERID_HINT':
-			case 'NEED_PASSPHRASE':
-			case 'GOOD_PASSPHRASE':
-			case 'BEGIN_SIGNING':
-			case 'CARDCTRL':
-			case 'KEYEXPIRED':
-			case 'SIGEXPIRED':
-			case 'KEYREVOKED':
-			case 'SC_OP_SUCCESS':
-				break;
-			case 'INV_SGNR':
-				list ($reason, $who) = GpgUtils::multiSplit ($value);
-				throw new GpgError ('Invalid sender: ' . self::$invalidRecipient [$reason] . ' (' . $who . ')');
-			case 'NO_SGNR':
-				throw new GpgError ('No senders are usable');
-			case 'SC_OP_FAILURE':
-				throw new GpgSmartcardError ($value);
-			case 'MISSING_PASSPHRASE':
-				throw new GpgPassphraseError ('Missing passphrase');
-			case 'BAD_PASSPHRASE':
-				throw new GpgPassphraseError ('Bad passphrase');
-			case 'SIG_CREATED':
-				list (
-					$this->type, $this->algorithm, $this->hashAlgorithm,
-					$cls, $this->timestamp, $this->fingerprint
-				) = GpgUtils::multiSplit ($value);
-				$this->algorithm = (int) $this->algorithm;
-				$this->hashAlgorithm = (int) $this->hashAlgorithm;
-				$this->timestamp = GpgUtils::getTimestamp ($this->timestamp);
-				break;
-			default:
-				throw new GpgUnknownStatus ($key);
-		}
+		$this->processors = array_merge (
+			$this->processors,
+			array (
+				'NEED_PASSPHRASE' => false, 'GOOD_PASSPHRASE' => false,
+				'BEGIN_SIGNING' => false, 'CARDCTRL' => false, 'KEYEXPIRED' => false,
+				'SIGEXPIRED' => false, 'KEYREVOKED' => false, 'SC_OP_SUCCESS' => false,
+				'USERID_HINT' => '_userid_hint',
+				'SIG_CREATED' => '_sig_created',
+			)
+		);
+	}
+
+	protected function _userid_hint ($code, $value)
+	{
+		$res = explode (' ', $value, 2);
+		$this->signer = $res [1];
+	}
+
+	protected function _sig_created ($code, $value)
+	{
+		list ($this->type, $this->algorithm, $this->hashAlgorithm, $cls, $this->timestamp, $this->fingerprint) = GpgUtils::multiSplit ($value);
+		$this->algorithm = (int) $this->algorithm;
+		$this->hashAlgorithm = (int) $this->hashAlgorithm;
+		$this->timestamp = GpgUtils::getTimestamp ($this->timestamp);
 	}
 }
 
@@ -481,27 +577,10 @@ class GpgSignResult extends GpgResult
  */
 class GpgVerifyResult extends GpgResult
 {
-	private static $pass = array (
-		'RSA_OR_IDEA', 'IMPORT_RES', 'PLAINTEXT',
-		'PLAINTEXT_LENGTH', 'POLICY_URL', 'DECRYPTION_INFO',
-		'DECRYPTION_OKAY', 'FILE_START', 'FILE_ERROR',
-		'FILE_DONE', 'PKA_TRUST_GOOD', 'PKA_TRUST_BAD', 'BADMDC',
-		'GOODMDC', 'TRUST_UNDEFINED', 'TRUST_NEVER',
-		'TRUST_MARGINAL', 'TRUST_FULLY', 'TRUST_ULTIMATE'
-	);
-
-	// Signature expired
-	const SIG_EXPIRED = 1;
-	// Signature was made by an expired key
-	const KEY_EXPIRED = 2;
-	// Signature was made by a revoked key
-	const KEY_REVOKED = 3;
-
-	private static $states = array (
-		'EXPSIG' => self::SIG_EXPIRED,
-		'EXPKEYSIG' => self::KEY_EXPIRED,
-		'REVKEYSIG' => self::KEY_REVOKED,
-	);
+	const STATE_OK = 'OK';
+	const STATE_SIG_EXPIRED = 'EXPSIG';
+	const STATE_KEY_REVOKED = 'REVKEYSIG';
+	const STATE_KEY_EXPIRED = 'EXPKEYSIG';
 
 	public $valid = false;
 	public $fingerprint;
@@ -509,156 +588,132 @@ class GpgVerifyResult extends GpgResult
 	public $expireTimestamp;
 	public $id;
 	public $keyId;
-	public $username;
-	public $state = 0;
+	public $signer;
+	public $state = self::STATE_OK;
 
-	protected function setProps ($value)
+	public function __construct ()
 	{
-		list ($this->keyId, $this->username) = explode (' ', $value, 2);
+		$this->processors = array_merge (
+			$this->processors,
+			array (
+				'RSA_OR_IDEA' => false, 'IMPORT_RES' => false, 'PLAINTEXT' => false,
+				'PLAINTEXT_LENGTH' => false, 'POLICY_URL' => false, 'DECRYPTION_INFO' => false,
+				'DECRYPTION_OKAY' => false, 'FILE_START' => false, 'FILE_ERROR' => false,
+				'FILE_DONE' => false, 'PKA_TRUST_GOOD' => false, 'PKA_TRUST_BAD' => false,
+				'BADMDC' => false, 'GOODMDC' => false, 'TRUST_UNDEFINED' => false,
+				'TRUST_NEVER' => false, 'TRUST_MARGINAL' => false, 'TRUST_FULLY' => false,
+				'TRUST_ULTIMATE' => false, 'KEYEXPIRED' => false, 'SIGEXPIRED' => false,
+				'KEYREVOKED' => false,
+
+				'EXPSIG' => '_set_state',
+				'EXPKEYSIG' => '_set_state',
+				'REVKEYSIG' => '_set_state',
+				'BADSIG' => '_badsig',
+				'GOODSIG' => '_goodsig',
+				'VALIDSIG' => '_validsig',
+				'ERRSIG' => '_errsig',
+				'SIG_ID' => '_sig_id'
+			)
+		);
 	}
 
-	public function handle ($key, $value)
+	protected function _set_state ($code, $value)
 	{
-		if (in_array ($key, self::$pass))
-			return;
-		switch ($key)
-		{
-			case 'NODATA':
-				throw new GpgNoDataError ();
-			case 'INV_RECP':
-			case 'INV_SGNR':
-				list ($reason, $who) = GpgUtils::multiSplit ($value);
-				throw new GpgError (
-					($key == 'INV_RECP' ? 'Invalid recipient: ' : 'Invalid sender: ')
-						. self::$invalidRecipient [$reason] . ' (' . $who . ')'
-				);
-			case 'NO_SGNR':
-				throw new GpgError ('No senders are usable');
-			case 'NO_RECP':
-				throw new GpgError ('No recipients are usable');
-			case 'KEYEXPIRED':
-			case 'SIGEXPIRED':
-			case 'KEYREVOKED':
-				// these are useless in verify, since they are spit out for any
-				// pub/subkeys on the key, not just the one doing the signing.
-				// if we want to check for signatures with expired key,
-				// the relevant flag is EXPKEYSIG.
-				break;
-			case 'EXPSIG':
-			case 'EXPKEYSIG':
-			case 'REVKEYSIG':
-				$this->valid = false;
-				$this->state = self::$states [$key];
-				$this->setProps ($value);
-				break;
-			case 'BADSIG':
-				$this->valid = false;
-				$this->setProps ($value);
-				break;
-			case 'ERRSIG':
-				$this->valid = false;
-				$raw = GpgUtils::multiSplit ($value);
-				if ($raw [5] == 4)
-					throw new GpgAlgorithmError ('Cannot verify signature: unsupported algorithm');
-				elseif ($raw [5] == 9)
-					throw new GpgKeyError ('Cannot verify signature: missing public key ' . $raw [0]);
-				throw new GpgError ($msg);
-			case 'GOODSIG':
-				$this->valid = true;
-				$this->setProps ($value);
-				break;
-			case 'VALIDSIG':
-				// This status indicates that the signature is good. This is the same
-				// as GOODSIG but has the fingerprint as the argument. Both status
-				// lines are emitted for a good signature.
-				list ($this->fingerprint, $_dummy,
-					$this->timestamp, $this->expireTimestamp) = array_slice (GpgUtils::multiSplit ($value), 0, 4);
-				$this->timestamp = GpgUtils::getTimestamp ($this->timestamp);
-				break;
-			case 'SIG_ID':
-				list ($this->id, $_dummy, $this->timestamp) = GpgUtils::multiSplit ($value);
-				$this->timestamp = GpgUtils::getTimestamp ($this->timestamp);
-				break;
-			case 'DECRYPTION_FAILED':
-				throw new GpgDecryptError ('The symmetric decryption failed - one reason could be a wrong passphrase for a symmetrical encrypted message.');
-			case 'NO_PUBKEY':
-				throw new GpgKeyError ('Cannot verify signature: missing public key ' . $value);
-			default:
-				throw new GpgUnknownStatus ($key);
-		}
+		$this->valid = false;
+		$this->state = $code;
+		list ($this->keyId, $this->signer) = explode (' ', $value, 2);
+	}
+
+	protected function _badsig ($code, $value)
+	{
+		$this->valid = false;
+		list ($this->keyId, $this->signer) = explode (' ', $value, 2);
+	}
+
+	protected function _goodsig ($code, $value)
+	{
+		$this->valid = true;
+		list ($this->keyId, $this->signer) = explode (' ', $value, 2);
+	}
+
+	protected function _validsig ($code, $value)
+	{
+		list ($this->fingerprint, $_dummy,
+			$this->timestamp, $this->expireTimestamp) = array_slice (GpgUtils::multiSplit ($value), 0, 4);
+		$this->timestamp = GpgUtils::getTimestamp ($this->timestamp);
+	}
+
+	protected function _errsig ($code, $value)
+	{
+		$this->valid = false;
+		$raw = GpgUtils::multiSplit ($value);
+		if ($raw [5] == 4)
+			throw new GpgAlgorithmError ('Unsupported algorithm', $this->err);
+		elseif ($raw [5] == 9)
+			throw new GpgKeyError ('Missing public key ' . $raw [0], $this->err);
+		throw new GpgGeneralError ($this->err);
+	}
+
+	protected function _sig_id ($code, $value)
+	{
+		$raw = GpgUtils::multiSplit ($value);
+		$this->id = $raw [0];
 	}
 }
 
 
 class GpgEncryptResult extends GpgVerifyResult
 {
-	private static $invalidRecipient = array (
-		0 => 'No specific reason given',
-		1 => 'Not Found',
-		2 => 'Ambigious specification',
-		3 => 'Wrong key usage',
-		4 => 'Key revoked',
-		5 => 'Key expired',
-		6 => 'No CRL known',
-		7 => 'CRL too old',
-		8 => 'Policy mismatch',
-		9 => 'Not a secret key',
-		10 => 'Key not trusted',
-		11 => 'Missing certificate',
-		12 => 'Missing issuer certificate'
-	);
-
 	public $signatureExpired = false;
 
 	public $keyExpired = false;
 
-	public function handle ($key, $value)
+	public function __construct ()
 	{
-		switch ($key)
-		{
-			case 'ENC_TO':
-			case 'USERID_HINT':
-			case 'GOODMDC':
-			case 'END_DECRYPTION':
-			case 'BEGIN_SIGNING':
-			case 'ERROR':
-			case 'CARDCTRL':
-			case 'BADMDC':
-			case 'SC_OP_SUCCESS':
-				// in the case of ERROR, this is because a more specific error
-				// message will have come first
-				break;
-			case 'NODATA':
-				throw new GpgNoDataError ();
-			case 'NO_SECKEY':
-				throw new GpgKeyError ('The secret key is not available (' . $value . ')');
-			case 'SC_OP_FAILURE':
-				throw new GpgSmartcardError ($value);
-			case 'BAD_PASSPHRASE':
-				throw new GpgPassphraseError ('Bad passphrase');
-			case 'MISSING_PASSPHRASE':
-				throw new GpgPassphraseError ('Missing passphrase');
-			case 'KEY_NOT_CREATED':
-				throw new GpgError (trim ($this->err));
-			case 'NEED_PASSPHRASE':
-			case 'GOOD_PASSPHRASE':
-			case 'NEED_PASSPHRASE_SYM':
-			case 'BEGIN_DECRYPTION':
-			case 'BEGIN_ENCRYPTION':
-			case 'DECRYPTION_OKAY':
-			case 'END_ENCRYPTION':
-			case 'SIG_CREATED':
-				// Nothing to do
-				break;
-			case 'KEYEXPIRED':
-				$this->keyExpired = true;
-				break;
-			case 'SIGEXPIRED':
-				$this->signatureExpired = true;
-				break;
-			default:
-				parent::handle ($key, $value);
-		}
+		parent::__construct ();
+		$this->processors = array_merge (
+			$this->processors,
+			array (
+				'SC_OP_SUCCESS' => false, 'CARDCTRL' => false, 'ENC_TO' => false,
+				'ERROR' => false, 'USERID_HINT' => false, 'BEGIN_SIGNING' => false,
+				'NEED_PASSPHRASE' => false, 'NEED_PASSPHRASE_SYM' => false, 'GOOD_PASSPHRASE' => false,
+				'BEGIN_DECRYPTION' => false, 'END_DECRYPTION' => false, 'DECRYPTION_OKAY' => false,
+				'BEGIN_ENCRYPTION' => false, 'END_ENCRYPTION' => false,
+				'SIG_CREATED' => false,
+
+				'KEY_NOT_CREATED' => '_key_not_created',
+				'KEYEXPIRED' => '_key_expired',
+				'SIGEXPIRED' => '_sig_expired',
+				'USERID_HINT' => '_userid_hint'
+			)
+		);
+	}
+
+	public function handle ()
+	{
+		parent::handle ();
+		$this->valid = !empty ($this->data);
+	}
+
+	protected function _key_not_created ($code, $value)
+	{
+		throw new GpgGeneralError ($this->err);
+	}
+
+	protected function _key_expired ($code, $value)
+	{
+		$this->keyExpired = true;
+	}
+
+	protected function _sig_expired ($code, $value)
+	{
+		$this->signatureExpired = true;
+	}
+
+	protected function _userid_hint ($code, $value)
+	{
+		$res = explode (' ', $value, 2);
+		$this->signer = $res [1];
 	}
 }
 
@@ -691,13 +746,17 @@ class GnuPG
 		$this->homedir = $homedir;
 	}
 
-	protected function execute ($args, $stdin = null, $passphrase = false)
+	protected function execute ($result, $args, $stdin = null, $passphrase = false)
 	{
 		$cmd = array ('--status-fd', '3', '--no-tty', '--lock-multiple', '--no-permission-warning');
 		if ($this->homedir)
 			$cmd = array_merge ($cmd, array ('--homedir', $this->homedir));
 		if ($passphrase !== false)
-			$cmd = array_merge ($cmd, array ('--batch', '--passphrase', $passphrase));
+		{
+			if (!in_array ('--batch', $args))
+				$cmd [] = '--batch';
+			$cmd = array_merge ($cmd, array ('--passphrase-fd', '0'));
+		}
 		$cmd = array_merge ($cmd, $args);
 		foreach ($cmd as &$arg)
 			$arg = escapeshellarg ($arg);
@@ -719,17 +778,19 @@ class GnuPG
 		if (!is_resource ($process))
 			throw new GpgProcError ($this->binary);
 
+		if ($passphrase !== false)
+		{
+			fwrite ($pipes [0], $passphrase . "\n");
+		}
+
 		if (!is_null ($stdin))
 		{
 			fwrite ($pipes [0], $stdin);
 			fclose ($pipes [0]);
 		}
 
-		$result = array (
-			'data' => stream_get_contents ($pipes [1]),
-			'err' => stream_get_contents ($pipes [2]),
-			'status' => array ()
-		);
+		$result->data = stream_get_contents ($pipes [1]);
+		$result->err = stream_get_contents ($pipes [2]);
 
 		while (!feof ($pipes [3]))
 		{
@@ -737,12 +798,15 @@ class GnuPG
 			//echo "<<< " . $line . "\n";
 			if (substr ($line, 0, 8) != '[GNUPG:]') continue;
 			$l = explode (' ', substr ($line, 9), 2);
-			$result ['status'][] = array ($l [0], count ($l) > 1 ? $l [1] : '');
+			$result->status [] = array ($l [0], count ($l) > 1 ? $l [1] : '');
 		}
 		fclose ($pipes [1]);
 		fclose ($pipes [2]);
 		fclose ($pipes [3]);
 		proc_close ($process);
+
+		$result->handle ();
+
 		return $result;
 	}
 
@@ -753,9 +817,7 @@ class GnuPG
 	 */
 	public function importKeys ($keyData)
 	{
-		return new GpgImportResult (
-			$this->execute (array ('--import'), $keyData)
-		);
+		return $this->execute (new GpgImportResult (), array ('--import'), $keyData);
 	}
 
 	/**
@@ -768,8 +830,27 @@ class GnuPG
 	{
 		if (!is_array ($keys))
 			$keys = array ($keys);
-		return new GpgImportResult (
-			$this->execute (array_merge (array ('--keyserver', $keyserver, '--recv-keys'), $keys), '')
+		return $this->execute (
+			new GpgImportResult (),
+			array_merge (array ('--keyserver', $keyserver, '--recv-keys'), $keys)
+		);
+	}
+
+	/**
+	 * List keys from the public or secret keyrings.
+	 * @param bool $secret List secret keys when true
+	 * @return GpgListKeysResult
+	 */
+	public function listKeys ($secret = false)
+	{
+		return $this->execute (
+			new GpgListKeysResult (),
+			array (
+				'--list-' . ($secret ? 'secret-keys' : 'keys'),
+				'--fixed-list-mode',
+				'--fingerprint',
+				'--with-colons'
+			)
 		);
 	}
 
@@ -784,25 +865,35 @@ class GnuPG
 	{
 		if (!is_array ($keys))
 			$keys = array ($keys);
-		$args = array_merge (($binary ? array ($secret ? '--export-secret-keys' : '--export') : array ('--armor', '--export')), $keys);
-		return new GpgExportResult ($this->execute ($args));
+		return $this->execute (
+			new GpgExportResult (),
+			array_merge (
+				($binary
+					? array ($secret ? '--export-secret-keys' : '--export')
+					: array ('--armor', '--export')
+				),
+				$keys
+			)
+		);
 	}
 
 	/**
-	 * List keys from the public or secret keyrings.
-	 * @param bool $secret List secret keys when true
-	 * @return GpgListKeysResult
+	 * Remove keys from the public or secret keyrings.
+	 * @param mixed $fingerprints Single key fingerprint string or array of multiple fingerprints
+	 * @param bool $secret Delete secret keys when true
+	 * @return GpgDeleteResult
 	 */
-	public function listKeys ($secret = false)
+	public function deleteKeys ($fingerprints, $secret = false)
 	{
-		return new GpgListKeysResult (
-			$this->execute (array (
-				'--list-' . ($secret ? 'secret-keys' : 'keys'),
-				'--fixed-list-mode',
-				'--fingerprint',
-				'--with-colons'
+		if (!is_array ($fingerprints))
+			$fingerprints = array ($fingerprints);
+		return $this->execute (
+			new GpgDeleteResult (),
+			array_merge (
+				array ('--batch', '--delete-' . ($secret ? 'secret-key' : 'key')),
+				$fingerprints
 			)
-		));
+		);
 	}
 
 	/**
@@ -821,26 +912,6 @@ class GnuPG
 			if (substr ($fingerprint, -strlen ($key)) == $key)
 				return true;
 		return false;
-	}
-
-	/**
-	 * Remove keys from the public or secret keyrings.
-	 * @param mixed $fingerprints Single key fingerprint string or array of multiple fingerprints
-	 * @param bool $secret Delete secret keys when true
-	 * @return GpgDeleteResult
-	 */
-	public function deleteKeys ($fingerprints, $secret = false)
-	{
-		if (!is_array ($fingerprints))
-			$fingerprints = array ($fingerprints);
-		return new GpgDeleteResult (
-			$this->execute (
-				array_merge (
-					array ('--batch', '--delete-' . ($secret ? 'secret-key' : 'key')),
-					$fingerprints
-				)
-			)
-		);
 	}
 
 	/**
@@ -878,9 +949,7 @@ class GnuPG
 	 */
 	public function genKey ($input)
 	{
-		return new GpgGenKeyResult (
-			$this->execute (array ('--gen-key', '--batch'), $input)
-		);
+		return $this->execute (new GpgGenKeyResult (), array ('--gen-key', '--batch'), $input);
 	}
 
 	/**
@@ -903,9 +972,7 @@ class GnuPG
 			$args [] = '--clearsign';
 		if ($keyId)
 			$args = array_merge ($args, array ('--default-key', $keyId));
-		return new GpgSignResult (
-			$this->execute ($args, $message, $passphrase)
-		);
+		return $this->execute (new GpgSignResult (), $args, $message, $passphrase);
 	}
 
 	/**
@@ -937,17 +1004,14 @@ class GnuPG
 	public function verify ($sign, $dataFilename = null)
 	{
 		if (is_null ($dataFilename))
-			$res = $this->execute (array ('--verify'), $sign);
-		else
-		{
-			// Handling detached verification
-			$signFilename = tempnam (sys_get_temp_dir (), 'php-gnupg');
-			file_put_contents ($signFilename, $sign);
-			$res = $this->execute (array ('--verify', $signFilename, $dataFilename));
-		}
-		if (isset ($signFilename))
-			unlink ($signFilename);
-		return new GpgVerifyResult ($res);
+			return $this->execute (new GpgVerifyResult (), array ('--verify'), $sign);
+
+		// Handling detached verification
+		$signFilename = tempnam (sys_get_temp_dir (), 'php-gnupg');
+		file_put_contents ($signFilename, $sign);
+		$result = $this->execute (new GpgVerifyResult (), array ('--verify', $signFilename, $dataFilename));
+		unlink ($signFilename);
+		return $result;
 	}
 
 	/**
@@ -991,9 +1055,7 @@ class GnuPG
 			$args = array_merge ($args, array ('--sign', '--default-key', $signKey));
 		if ($alwaysTrust)
 			$args [] = '--always-trust';
-		return new GpgEncryptResult (
-			$this->execute ($args, $data, $passphrase)
-		);
+		return $this->execute (new GpgEncryptResult (), $args, $data, $passphrase);
 	}
 
 	/**
@@ -1041,7 +1103,7 @@ class GnuPG
 			$args = array_merge ($args, array ('-u', $sender));
 		if ($alwaysTrust)
 			$args [] = '--always-trust';
-		return new GpgEncryptResult ($this->execute ($args, $data, $passphrase));
+		return $this->execute (new GpgEncryptResult (), $args, $data, $passphrase);
 	}
 
 	/**
