@@ -35,8 +35,8 @@ class GpgGeneralError extends GpgError
 	public function __construct ($err)
 	{
 		$data = array ();
-		foreach ($err as $line)
-			if (strpos ($line, 'gpg: -:') === 0)
+		foreach (explode ("\n", $err) as $line)
+			if (substr ($line, 0, 4) == 'gpg:')
 				$data [] = $line;
 		parent::__construct (implode ("\n", $data), $err);
 	}
@@ -172,13 +172,15 @@ abstract class GpgResult
 
 	public function handle ()
 	{
-		foreach ($this->status as $status => $value)
+		if (is_null ($this->status)) return;
+		foreach ($this->status as $status)
 		{
-			echo 'GpgResult::handle(): processing status ' . $status . "\n";
-			if (!isset ($this->status [$status]))
-				throw new GpgUnknownStatus ($status);
-			if ($this->status [$status])
-				call_user_method ($this->status [$status], $this, $status, $value);
+			$code = $status [0];
+			//echo 'GpgResult::handle(): processing status ' . $code . "\n";
+			if (!isset ($this->processors [$code]))
+				throw new GpgUnknownStatus ($code);
+			if ($this->processors [$code])
+				$this->{$this->processors [$code]} ($code, $status [1]);
 		}
 	}
 
@@ -287,6 +289,13 @@ class GpgImportResult extends GpgResult
 				'IMPORT_RES' => '_import_res'
 			)
 		);
+	}
+
+	public function handle ()
+	{
+		parent::handle ();
+		if (empty ($this->results) && $this->err)
+			throw new GpgGeneralError ($this->err);
 	}
 
 	private function _add_result ($fingerprint, $reason, $problem = null)
@@ -416,23 +425,10 @@ class GpgListKeysResult extends GpgResult
 
 	private $current = array ();
 
-	public function __construct ($data)
-	{
-		parent::__construct ($data);
-		$this->data = explode ("\n", $this->data);
-		foreach ($this->data as $line)
-		{
-			$line = trim ($line);
-			if (!$line) continue;
-			$fields = explode (':', $line);
-			if (!isset (self::$keywords [$fields [0]]))
-				continue;
-			$this->handle ($fields [0], array_slice ($fields, 1));
-		}
-	}
-
 	public function handle ()
 	{
+		if (!$this->data && $this->err)
+			throw new GpgGeneralError ($this->err);
 		foreach (explode ("\n", $this->data) as $line)
 		{
 			$line = trim ($line);
@@ -858,7 +854,7 @@ class GnuPG
 	 * Export keys
 	 * @param mixed $keys Single key ID string or array of multiple IDs
 	 * @param string $secret Export secret keys if true
-	 * @param string $binary Armored format if true
+	 * @param bool $binary Armored format if false
 	 * @return GpgExportResult
 	 */
 	public function exportKeys ($keys, $secret = false, $binary = false)
