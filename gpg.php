@@ -469,7 +469,7 @@ class GpgListKeysResult extends GpgResult
 
 /**
  * exportKeys() result
- * FIXME: Убрать как лишний?
+ * field $data contains exported keys
  */
 class GpgExportResult extends GpgResult {}
 
@@ -537,6 +537,10 @@ class GpgSignResult extends GpgResult
 	 */
 	public $timestamp;
 
+	/**
+	 * Signer data
+	 * @var string
+	 */
 	public $signer;
 
 	public function __construct ()
@@ -578,13 +582,52 @@ class GpgVerifyResult extends GpgResult
 	const STATE_KEY_REVOKED = 'REVKEYSIG';
 	const STATE_KEY_EXPIRED = 'EXPKEYSIG';
 
+	/**
+	 * True if verified correctly
+	 * @var bool
+	 */
 	public $valid = false;
+
+	/**
+	 * Signer fingerprint
+	 * @var string
+	 */
 	public $fingerprint;
+
+	/**
+	 * Signature timestamp
+	 * @var int
+	 */
 	public $timestamp;
+
+	/**
+	 * Signature expiration timestamp
+	 * @var int
+	 */
 	public $expireTimestamp;
+
+	/**
+	 * Signature ID
+	 * @var string
+	 */
 	public $id;
+
+	/**
+	 * Signer key ID
+	 * @var string
+	 */
 	public $keyId;
+
+	/**
+	 * Signer name
+	 * @var string
+	 */
 	public $signer;
+
+	/**
+	 * Sign state
+	 * @var string
+	 */
 	public $state = self::STATE_OK;
 
 	public function __construct ()
@@ -660,8 +703,14 @@ class GpgVerifyResult extends GpgResult
 
 class GpgEncryptResult extends GpgVerifyResult
 {
+	/**
+	 * @var bool
+	 */
 	public $signatureExpired = false;
 
+	/**
+	 * @var bool
+	 */
 	public $keyExpired = false;
 
 	public function __construct ()
