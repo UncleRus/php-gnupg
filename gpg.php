@@ -21,6 +21,10 @@
 
 class GpgError extends Exception
 {
+	/**
+	 * STDERR output of GnuPG executable
+	 * @var string
+	 */
 	public $err;
 
 	public function __construct ($message, $err)
@@ -54,7 +58,7 @@ class GpgUnknownStatus extends GpgError
 {
 	public function __construct ($status)
 	{
-		parent::__construct ('Uknown GnuPG status: ' . $status, null);
+		parent::__construct ('Unknown GnuPG status: ' . $status, null);
 	}
 }
 
@@ -74,9 +78,30 @@ class GpgSmartcardError extends GpgError
 
 class GpgNoDataError extends GpgError
 {
-	public function __construct ($err)
+	static private $reasons = array (
+		1 => 'No armored data',
+		2 => 'Expected a packet but did not found one',
+		3 => 'Invalid packet found, this may indicate a non OpenPGP message',
+		4 => 'Signature expected but not found'
+	);
+
+	public function __construct ($err, $code)
 	{
-		parent::__construct ('No valid data found', $err);
+		parent::__construct (isset (self::$reasons [$code]) ? self::$reasons [$code] : 'No valid data found', $err);
+	}
+}
+
+
+class GpgUnexpectedData extends GpgError
+{
+	static private $reasons = array (
+		'Not further specified',
+		'Corrupted message structure'
+	);
+
+	public function __construct ($err, $code)
+	{
+		parent::__construct (isset (self::$reasons [$code]) ? self::$reasons [$code] : 'Unexpected data found', $err);
 	}
 }
 
@@ -158,6 +183,7 @@ abstract class GpgResult
 
 	protected $processors = array (
 		'NODATA' => '_nodata',
+		'UNEXPECTED' => '_unexpected',
 		'SC_OP_FAILURE' => '_sc_op_failure',
 		'INV_SGNR' => '_inv_member',
 		'INV_RECP' => '_inv_member',
@@ -186,7 +212,12 @@ abstract class GpgResult
 
 	protected function _nodata ($code, $value)
 	{
-		throw new GpgNoDataError ($this->err);
+		throw new GpgNoDataError ($this->err, $value);
+	}
+
+	protected function _unexpected ($code, $value)
+	{
+		throw new GpgUnexpectedData ($this->err, $value);
 	}
 
 	protected function _sc_op_failure ($code, $value)
@@ -229,7 +260,7 @@ abstract class GpgResult
 
 	protected function _bad_passphrase ($code, $value)
 	{
-		throw new GpgPassphraseError ('Bad passphrase', $this->err);
+		throw new GpgPassphraseError ('Bad passphrase for key ' . $value, $this->err);
 	}
 
 	protected function _decryption_failed ($code, $value)
