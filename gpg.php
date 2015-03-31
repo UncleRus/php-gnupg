@@ -831,7 +831,7 @@ class GnuPG
 		{
 			if (!in_array ('--batch', $args))
 				$cmd [] = '--batch';
-			$cmd = array_merge ($cmd, array ('--passphrase-fd', '0'));
+			$cmd = array_merge ($cmd, array ('--passphrase-fd', '4'));
 		}
 		$cmd = array_merge ($cmd, $args);
 		foreach ($cmd as &$arg)
@@ -839,14 +839,16 @@ class GnuPG
 		$cmd = implode (' ', $cmd);
 
 		//echo ">>> " . escapeshellcmd ($this->binary) . ' ' . $cmd . "\n";
+		$stdinHandle = fopen('data://text/plain;base64,'. base64_encode($stdin), 'r');
 
 		$process = proc_open (
 			escapeshellcmd ($this->binary) . ' ' . $cmd,
 			array (
+				$stdinHandle,
+				array ('pipe', 'w'),
+				array ('pipe', 'w'),
+				array ('pipe', 'w'),
 				array ('pipe', 'r'),
-				array ('pipe', 'w'),
-				array ('pipe', 'w'),
-				array ('pipe', 'w')
 			),
 			$pipes
 		);
@@ -856,13 +858,7 @@ class GnuPG
 
 		if ($passphrase !== false)
 		{
-			fwrite ($pipes [0], $passphrase . "\n");
-		}
-
-		if (!is_null ($stdin))
-		{
-			fwrite ($pipes [0], $stdin);
-			fclose ($pipes [0]);
+			fwrite ($pipes [4], $passphrase . "\n");
 		}
 
 		$result->data = stream_get_contents ($pipes [1]);
@@ -880,6 +876,7 @@ class GnuPG
 		fclose ($pipes [2]);
 		fclose ($pipes [3]);
 		proc_close ($process);
+		fclose($stdinHandle);
 
 		$result->handle ();
 
