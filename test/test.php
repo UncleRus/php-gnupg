@@ -181,7 +181,7 @@ class GpgTest extends TestCase
 
 	public function testGenKey ()
 	{
-		$input = $this->gpg->genKeyInput ();
+		$input = $this->gpg->genKeyInput (array ('Passphrase' => 'sender_pwd'));
 		$res = $this->gpg->genKey ($input);
 		$this->assertEquals ($res->type, 'P');
 		$this->gpg->deleteKeys ($res->fingerprint, true);
