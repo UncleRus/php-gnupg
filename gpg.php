@@ -13,7 +13,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
- * @version 0.1.2
+ * @version 0.1.3
  * @author Ruslan V. Uss
  *
  * homepage: https://github.com/UncleRus/php-gnupg
@@ -811,6 +811,22 @@ class GpgEncryptResult extends GpgVerifyResult
 	}
 }
 
+class GpgVersionResult
+{
+	public $data;
+	public $status;
+	public $err;
+
+	public $version;
+
+	public function handle()
+	{
+		preg_match('/gpg\s+\(GnuPG\)\s+(\d+)\./', $this->data, $g);
+		if (!isset($g[1])) throw new GpgGeneralError('gpg: Could not get version');
+		$this->version = (int)$g[1];
+	}
+}
+
 /**
  * Encapsulate access to the gpg executable.
  */
@@ -829,6 +845,12 @@ class GnuPG
 	public $homedir;
 
 	/**
+	 * GnuPG major version
+	 * @var int
+	 */
+	public $version;
+
+	/**
 	 * Initialize a GPG process wrapper
 	 * @param string $binary Full pathname for GPG binary.
 	 * @param string $homedir Full pathname to where we can find the public and
@@ -838,10 +860,14 @@ class GnuPG
 	{
 		$this->binary = $binary;
 		$this->homedir = $homedir;
+		$this->version = null;
 	}
 
 	protected function execute($result, $args, $stdin = null, $passphrase = false)
 	{
+		if (!$this->version && !in_array('--version', $args))
+			$this->version = $this->execute(new GpgVersionResult(), array('--version'))->version;
+
 		$cmd = array('--status-fd', '3', '--no-tty', '--lock-multiple', '--no-permission-warning');
 		if ($this->homedir)
 			$cmd = array_merge($cmd, array('--homedir', $this->homedir));
@@ -849,7 +875,9 @@ class GnuPG
 		{
 			if (!in_array('--batch', $args))
 				$cmd[] = '--batch';
-			$cmd = array_merge($cmd, array('--passphrase-fd', '4', '--pinentry-mode', 'loopback'));
+			$cmd = array_merge($cmd, array('--passphrase-fd', '4'));
+			if ($this->version > 1)
+				$cmd = array_merge($cmd, array('--pinentry-mode', 'loopback'));
 		}
 		$cmd = array_merge($cmd, $args);
 		foreach ($cmd as &$arg)
